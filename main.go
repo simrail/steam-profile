@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 )
 
 type SteamProfileResponse struct {
@@ -31,6 +32,9 @@ type SteamProfilePlayer struct {
 	TimeCreated         int    `json:"timecreated"`
 	PersonaStateFlags   int    `json:"personastateflags"`
 	LocationCountryCode string `json:"loccountrycode"`
+	Playtime2Weeks        int    `json:"playtime_2weeks"`
+    PlaytimeForever       int    `json:"playtime_forever"`
+
 }
 
 func main() {
@@ -45,36 +49,67 @@ func main() {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	steamid := r.URL.Query().Get("steamid")
+    steamid := strings.TrimPrefix(r.URL.Path, "/")
 
-	if steamid == "" || len(steamid) != 17 {
-		http.Error(w, "SteamID is incorrect", http.StatusBadRequest)
-		return
-	}
+    if steamid == "" || len(steamid) != 17 {
+        http.Error(w, "SteamID is incorrect", http.StatusBadRequest)
+        return
+    }
 
-	url := fmt.Sprintf("http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=%s&steamids=%s", os.Getenv("STEAM_TOKEN"), steamid)
-	resp, err := http.Get(url)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
+    // Retrieve Steam profile information
+    profileURL := fmt.Sprintf("http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=%s&steamids=%s", os.Getenv("STEAM_TOKEN"), steamid)
+    profileResp, err := http.Get(profileURL)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+    defer profileResp.Body.Close()
 
-	var steamProfileResponse SteamProfileResponse
-	err = json.NewDecoder(resp.Body).Decode(&steamProfileResponse)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+    var steamProfileResponse SteamProfileResponse
+    err = json.NewDecoder(profileResp.Body).Decode(&steamProfileResponse)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
 
-	if len(steamProfileResponse.Response.Players) == 0 {
-		http.Error(w, "No player found", http.StatusBadRequest)
-		return
-	}
+    if len(steamProfileResponse.Response.Players) == 0 {
+        http.Error(w, "No player found", http.StatusBadRequest)
+        return
+    }
 
-	player := steamProfileResponse.Response.Players[0]
+    // Retrieve owned games information
+    gamesURL := fmt.Sprintf("http://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=%s&steamid=%s&format=json&appids_filter[0]=1422130", os.Getenv("STEAM_TOKEN"), steamid)
+    gamesResp, err := http.Get(gamesURL)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+    defer gamesResp.Body.Close()
 
-	w.Header().Set("Cache-Control", "public, maxage=86400")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(player)
+    var gamesResponse struct {
+        Response struct {
+            GameCount int `json:"game_count"`
+            Games     []struct {
+                AppID           int `json:"appid"`
+                Playtime2Weeks  int `json:"playtime_2weeks"`
+                PlaytimeForever int `json:"playtime_forever"`
+            } `json:"games"`
+        } `json:"response"`
+    }
+    err = json.NewDecoder(gamesResp.Body).Decode(&gamesResponse)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    // Add owned games information to player struct
+    player := steamProfileResponse.Response.Players[0]
+    if len(gamesResponse.Response.Games) > 0 {
+        player.Playtime2Weeks = gamesResponse.Response.Games[0].Playtime2Weeks
+        player.PlaytimeForever = gamesResponse.Response.Games[0].PlaytimeForever
+    }
+
+    w.Header().Set("Cache-Control", "public, maxage=86400")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(player)
 }
